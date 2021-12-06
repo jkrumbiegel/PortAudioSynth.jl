@@ -9,16 +9,21 @@ mutable struct AudioBuffer
     len::Int
     pos::Ptr{Cint} # position of player in buffer
     posvec::Vector{Cint} # vector reference so no problems with garbage collection
+    condition::Base.AsyncCondition
+    condition_handle::Ptr{Nothing} # for calling with uv_async_send
 end
 
 function AudioBuffer(vec::Vector{Float32})
     posvec = Cint[1]
+    cond = Base.AsyncCondition()
     AudioBuffer(
         Base.unsafe_convert(Ptr{Float32}, vec),
         vec, # for garbage safety
         length(vec),
         Base.unsafe_convert(Ptr{Cint}, posvec),
         posvec, # for garbage safety
+        cond,
+        cond.handle,
     )
 end
 
@@ -36,6 +41,8 @@ function mycallback(inputbuffer, outputbuffer, framecount, timeinfo, statusflags
 
     newpos = mod1(pos + 256, audio.len)
     unsafe_store!(audio.pos, newpos, 1)
+
+    @ccall uv_async_send(audio.condition_handle::Ptr{Nothing})::Cvoid
 
     return 0
 end
@@ -59,7 +66,8 @@ macro checkerr(exp)
     end
 end
 
-mutable struct SineGenerator
+mutable struct PeriodicGenerator{F}
+    func::F
     samplerate::Int
     phase::Float64
     frequency_hz::Float64
@@ -67,15 +75,15 @@ mutable struct SineGenerator
     current_period::Float64
 end
 
-function next_sample!(s::SineGenerator)::Float32
+function next_sample!(s::PeriodicGenerator)::Float32
     delta_period = s.frequency_hz / s.samplerate * 2pi
-    s.current_period += delta_period
-    sample = s.volume * sin(s.current_period - s.phase)
+    s.current_period = mod(s.current_period + delta_period, 2pi)
+    sample = s.volume * s.func(s.current_period - s.phase)
 end
 
 
 function run(compute_next_sample)
-    buflen = 4096
+    buflen = 256 * 8
     framecount = 256
     samplerate = 44100
     buffer = zeros(Float32, buflen)
@@ -107,11 +115,8 @@ function run(compute_next_sample)
         # this is cpu hogging
         while !should_stop
             playhead = Int(audio.posvec[1])
+            # this will be wrong if the playhead went 1 cycle or more
             nsamples = mod(playhead - lastplayhead, buflen)
-            if nsamples <= 0
-                yield()
-                continue
-            end
             pos = lastplayhead
             lastplayhead = playhead
             for i in 1:nsamples
@@ -123,7 +128,7 @@ function run(compute_next_sample)
                 buffer[pos] = new_sample
                 pos = mod1(pos + 1 , buflen)
             end
-            yield()
+            wait(audio.condition)
         end
     finally
         @info "Stopping stream"
@@ -131,6 +136,53 @@ function run(compute_next_sample)
         @info "Terminating PortAudio"
         @checkerr LibPortAudio.Pa_Terminate()
     end
+end
+
+abstract type Effect end
+
+mutable struct EffectChain{T}
+    generator::T
+    effects::Vector{<:Effect}
+end
+
+function next_sample!(e::EffectChain)::Float32
+    s = next_sample!(e.generator)
+    for ef in e.effects
+        s = next_sample!(ef, s)
+    end
+    s
+end
+
+mutable struct VolumeWobble <: Effect
+    strength::Float64
+    samplerate::Int
+    phase::Float64
+    frequency_hz::Float64
+    current_period::Float64
+end
+
+function next_sample!(e::EffectChain)::Float32
+    s = next_sample!(e.generator)
+    for ef in e.effects
+        s::Float32 = next_sample!(ef, s)
+    end
+    s
+end
+
+function next_sample!(v::VolumeWobble, s)::Float32
+    delta_period = v.frequency_hz / v.samplerate * 2pi
+    v.current_period = mod(v.current_period + delta_period, 2pi)
+    sample = s * (0.5 * v.strength * sin(v.current_period - v.phase) + (1 - 0.5 * v.strength))
+end
+
+struct CombinedGenerator{T<:Tuple}
+    generators::T
+end
+
+CombinedGenerator(args...) = CombinedGenerator(tuple(args...))
+
+function next_sample!(c::CombinedGenerator)::Float32
+    sum((next_sample!(g) for g in c.generators), init = 0f0)
 end
 
 end
