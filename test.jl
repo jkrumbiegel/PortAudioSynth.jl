@@ -63,46 +63,8 @@ using GLMakie
 
 
 
-
-
-
-let
-    f = Figure()
-    display(f)
-
-    running = Observable(false)
-    b = Button(f[1, 1], label = @lift($running ? "Stop" : "Start"), tellwidth = false)
-
-    freqs = 220 .* (1.0, 1.25, 1.5)
-    generators = [PortAudioSynth.PeriodicGenerator(triangle, 44100, 0.0, freq, 0.3, 0.0) for freq in freqs]
-
-    lsg = labelslidergrid!(f, "Sine Generator " .* ["1", "2", "3"], Ref(120:440), formats = "{}Hz")
-    f[0, 1] = lsg.layout
-
-    for (i, s) in enumerate(lsg.sliders)
-        set_close_to!(s, freqs[i])
-        on(s.value) do val
-            generators[i].frequency_hz = val
-        end
-    end
-
-    on(b.clicks) do c
-        running[] = !running[]
-        if running[]
-            @async PortAudioSynth.run() do
-                if !running[]
-                    return nothing
-                end
-
-                sum(PortAudioSynth.next_sample!(s) for s in generators)
-            end
-        end
-    end
-end
-
-
 struct Synth2
-    voices::Vector{PortAudioSynth.PeriodicGenerator}
+    voices::Vector{PeriodicGenerator}
     playing::Vector{Bool}
     keys::Vector{Int}
 end
@@ -145,14 +107,15 @@ end
 
 ##
 synth = Synth2(
-    [PortAudioSynth.PeriodicGenerator(triangle, 44100, 0.0, 0.0, 0.3, 0.0) for i in 1:5],
+    [PeriodicGenerator(PAS.triangle, 44100, 0.0, 0.0, 0.3, 0.0) for i in 1:5],
     zeros(Bool, 5),
     fill(-999, 5),
 )
-chain = PortAudioSynth.Track(
+
+track = Track(
     synth,
-    PortAudioSynth.Effect[
-        PortAudioSynth.VolumeWobble(0.5, 44100, 0.0, 3, 0.0),
+    Effect[
+        Delay(44100, 0.4, 0.5)
     ]    
 )
 
@@ -178,6 +141,8 @@ function get_keyindex(key)
     get(d, key, nothing)
 end
 
+##
+
 s = Scene(camera = campixel!)
 
 isblack(i) = mod1(i, 12) ∈ (2, 4, 7, 9, 11)
@@ -199,14 +164,12 @@ poly!(s, polys, color = colors, show_axis = false)
 
 display(s)
 
-running = Observable(true)
+##
 
-@async PortAudioSynth.run() do
-    if !running[]
-        return nothing
-    end
-    PortAudioSynth.next_sample!(chain)
-end
+a = AudioEngine(framecount = 256, n_buffers = 8)
+push!(a.tracks, track)
+
+@async start!(a)
 
 on(s.events.keyboardbutton) do event
     event.action === Makie.Keyboard.repeat && return
@@ -226,4 +189,7 @@ on(s.events.keyboardbutton) do event
     end
 end
 
+##
+
+stop!(a)
 

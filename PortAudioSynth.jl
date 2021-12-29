@@ -138,9 +138,10 @@ end
 
 function AudioEngine(;
         framecount = 256,
-        bufferlength = 8 * framecount,
+        n_buffers = 8,
         samplerate = 44100)
 
+    bufferlength = n_buffers * framecount
     buffer = zeros(Float32, bufferlength)
 
     AudioEngine(
