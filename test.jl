@@ -3,20 +3,48 @@ using Pkg
 Pkg.activate(".")
 
 includet("PortAudioSynth.jl")
+const PAS = PortAudioSynth
+using .PortAudioSynth
+
+
+
+
+
+
+##
+
+a = AudioEngine()
+
+push!(a.tracks, Track(
+    CombinedGenerator(
+        PeriodicGenerator(PAS.triangle, 44100, 0.0, 55.0, 0.3, 0.0),
+        PeriodicGenerator(PAS.triangle, 44100, 0.0, 165.5, 0.3, 0.0),
+        PeriodicGenerator(PAS.triangle, 44100, 0.0, 330.0, 0.3, 0.0),
+    ),
+    Effect[
+        VolumeWobble(0.5, 44100, 0.0, 5, 0.0),
+    ]
+))
+
+@async start(a)
+##
+stop(a)
+
+##
+
+
+
+
+
+
+
+###
 
 
 using GLMakie
 
 
-function triangle(period)
-    if 0 <= period < 0.5pi
-        period / 0.5pi
-    elseif 0.5pi <= period < 1.5pi
-        1 - (period - 0.5pi) / 0.5pi
-    else
-        (period - 2pi) / 0.5pi
-    end
-end
+
 
 
 
@@ -54,34 +82,6 @@ let
     end
 end
 
-
-
-##
-begin
-    running = Observable(true)
-    e = PortAudioSynth.EffectChain(
-        PortAudioSynth.CombinedGenerator(
-            PortAudioSynth.PeriodicGenerator(triangle, 44100, 0.0, 165.5, 0.3, 0.0),
-            PortAudioSynth.PeriodicGenerator(triangle, 44100, 0.0, 330.0, 0.3, 0.0),
-            PortAudioSynth.PeriodicGenerator(triangle, 44100, 0.0, 55.0, 0.3, 0.0),
-        ),
-        PortAudioSynth.Effect[
-            PortAudioSynth.VolumeWobble(0.5, 44100, 0.0, 5, 0.0),
-            PortAudioSynth.VolumeWobble(0.5, 44100, 0.0, 3, 0.0),
-        ]
-    )
-    @async PortAudioSynth.run() do
-        if !running[]
-            return nothing
-        end
-        PortAudioSynth.next_sample!(e)
-    end
-end
-##
-running[] = false
-
-
-##
 
 struct Synth2
     voices::Vector{PortAudioSynth.PeriodicGenerator}
@@ -131,7 +131,7 @@ synth = Synth2(
     zeros(Bool, 5),
     fill(-999, 5),
 )
-chain = PortAudioSynth.EffectChain(
+chain = PortAudioSynth.Track(
     synth,
     PortAudioSynth.Effect[
         PortAudioSynth.VolumeWobble(0.5, 44100, 0.0, 3, 0.0),

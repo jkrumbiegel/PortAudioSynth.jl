@@ -2,6 +2,15 @@ module PortAudioSynth
 
 using PortAudio.LibPortAudio
 
+export AudioEngine
+export CombinedGenerator
+export Effect
+export PeriodicGenerator
+export Track
+export VolumeWobble
+export start
+export stop
+
 
 mutable struct AudioBuffer
     ptr::Ptr{Float32}
@@ -81,14 +90,43 @@ function next_sample!(s::PeriodicGenerator)::Float32
     sample = s.volume * s.func(s.current_period - s.phase)
 end
 
+abstract type Effect end
 
-function run(compute_next_sample)
-    buflen = 256 * 8
-    framecount = 256
-    samplerate = 44100
-    buffer = zeros(Float32, buflen)
-    audio = AudioBuffer(buffer)
+mutable struct Track{T}
+    generator::T
+    effects::Vector{<:Effect}
+end
 
+mutable struct AudioEngine
+    tracks::Vector{Track}
+    bufferlength::Int
+    framecount::Int
+    samplerate::Int
+    buffer::Vector{Float32}
+    _audio::AudioBuffer
+    should_stop::Bool
+end
+
+function AudioEngine(;
+        framecount = 256,
+        bufferlength = 8 * framecount,
+        samplerate = 44100)
+
+    buffer = zeros(Float32, bufferlength)
+
+    AudioEngine(
+        [],
+        bufferlength,
+        framecount,
+        samplerate,
+        buffer,
+        AudioBuffer(buffer),
+        false,
+    )
+end
+
+
+function start(a::AudioEngine)
     @info "Initializing PortAudio"
     @checkerr LibPortAudio.Pa_Initialize()
     mutable_pointer = Ref{Ptr{LibPortAudio.PaStream}}(0)
@@ -98,10 +136,10 @@ function run(compute_next_sample)
         0,
         2,
         LibPortAudio.paFloat32,
-        samplerate,
-        framecount,
+        a.samplerate,
+        a.framecount,
         cfunc,
-        Ref(audio),
+        Ref(a._audio),
     )
 
     pointer_to = mutable_pointer[]
@@ -111,24 +149,22 @@ function run(compute_next_sample)
     try
         lastplayhead = 1
 
-        should_stop = false
-        # this is cpu hogging
-        while !should_stop
-            playhead = Int(audio.posvec[1])
+        while !a.should_stop
+            playhead = Int(a._audio.posvec[1])
             # this will be wrong if the playhead went 1 cycle or more
-            nsamples = mod(playhead - lastplayhead, buflen)
+            nsamples = mod(playhead - lastplayhead, a.bufferlength)
             pos = lastplayhead
             lastplayhead = playhead
             for i in 1:nsamples
-                new_sample = compute_next_sample()
+                new_sample = next_sample!(a)
                 if new_sample === nothing
                     should_stop = true
                     break
                 end
-                buffer[pos] = new_sample
-                pos = mod1(pos + 1 , buflen)
+                a.buffer[pos] = new_sample
+                pos = mod1(pos + 1 , a.bufferlength)
             end
-            wait(audio.condition)
+            wait(a._audio.condition)
         end
     finally
         @info "Stopping stream"
@@ -138,14 +174,15 @@ function run(compute_next_sample)
     end
 end
 
-abstract type Effect end
-
-mutable struct EffectChain{T}
-    generator::T
-    effects::Vector{<:Effect}
+function stop(a::AudioEngine)
+    a.should_stop = true
 end
 
-function next_sample!(e::EffectChain)::Float32
+function next_sample!(a::AudioEngine)::Float32
+    isempty(a.tracks) ? 0f0 : sum(next_sample!(t) for t in a.tracks)
+end
+
+function next_sample!(e::Track)::Float32
     s = next_sample!(e.generator)
     for ef in e.effects
         s = next_sample!(ef, s)
@@ -161,7 +198,7 @@ mutable struct VolumeWobble <: Effect
     current_period::Float64
 end
 
-function next_sample!(e::EffectChain)::Float32
+function next_sample!(e::Track)::Float32
     s = next_sample!(e.generator)
     for ef in e.effects
         s::Float32 = next_sample!(ef, s)
@@ -183,6 +220,16 @@ CombinedGenerator(args...) = CombinedGenerator(tuple(args...))
 
 function next_sample!(c::CombinedGenerator)::Float32
     sum((next_sample!(g) for g in c.generators), init = 0f0)
+end
+
+function triangle(period)
+    if 0 <= period < 0.5pi
+        period / 0.5pi
+    elseif 0.5pi <= period < 1.5pi
+        1 - (period - 0.5pi) / 0.5pi
+    else
+        (period - 2pi) / 0.5pi
+    end
 end
 
 end
