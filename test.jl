@@ -15,20 +15,38 @@ using .PortAudioSynth
 
 a = AudioEngine()
 
+ps = Tuple(PeriodicGenerator(PAS.triangle, 44100, 0.0, freq, 0.3, 0.0)
+    for freq in [100.0, 200.0, 300.0])
+c = CombinedGenerator(
+    ps,
+)
+g = Gain(1.0)
 push!(a.tracks, Track(
-    CombinedGenerator(
-        PeriodicGenerator(PAS.triangle, 44100, 0.0, 55.0, 0.3, 0.0),
-        PeriodicGenerator(PAS.triangle, 44100, 0.0, 165.5, 0.3, 0.0),
-        PeriodicGenerator(PAS.triangle, 44100, 0.0, 330.0, 0.3, 0.0),
-    ),
+    c,
     Effect[
-        VolumeWobble(0.5, 44100, 0.0, 5, 0.0),
+        g,
+        VolumeWobble(1.0, 44100, 0.0, 3, 0.0),
+        VolumeWobble(1.0, 44100, 0.0, 1.5, 0.0),
+        Delay(44100, 0.5, 0.5),
     ]
 ))
 
-@async start(a)
+@async start!(a)
 ##
-stop(a)
+
+for i in 1:100
+    for p in ps
+        p.frequency_hz = p.frequency_hz + 0.5 * randn()
+    end
+    sleep(1/30)
+end
+
+##
+g.gain = 1
+g.gain = 0
+
+##
+stop!(a)
 
 ##
 

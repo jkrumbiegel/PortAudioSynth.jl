@@ -4,12 +4,14 @@ using PortAudio.LibPortAudio
 
 export AudioEngine
 export CombinedGenerator
+export Delay
 export Effect
+export Gain
 export PeriodicGenerator
 export Track
 export VolumeWobble
-export start
-export stop
+export start!
+export stop!
 
 
 mutable struct AudioBuffer
@@ -92,6 +94,33 @@ end
 
 abstract type Effect end
 
+mutable struct Gain <: Effect
+    gain::Float32
+end
+
+next_sample!(g::Gain, s) = g.gain * s
+
+mutable struct Delay <: Effect
+    samplerate::Int
+    delay::Float64
+    gain::Float64
+    buffer::Vector{Float32}
+    position::Int
+end
+
+function Delay(samplerate, delay, gain)
+    bufferlength = round(Int, samplerate * delay)
+    Delay(samplerate, delay, gain, zeros(Float32, bufferlength), 1)
+end
+
+function next_sample!(d::Delay, s::Float32)::Float32
+    newpos = mod1(d.position + 1, length(d.buffer))
+    x = d.buffer[newpos]
+    y = d.buffer[newpos] = d.gain * s + d.gain * x
+    d.position = newpos
+    return y
+end
+
 mutable struct Track{T}
     generator::T
     effects::Vector{<:Effect}
@@ -126,7 +155,7 @@ function AudioEngine(;
 end
 
 
-function start(a::AudioEngine)
+function start!(a::AudioEngine)
     @info "Initializing PortAudio"
     @checkerr LibPortAudio.Pa_Initialize()
     mutable_pointer = Ref{Ptr{LibPortAudio.PaStream}}(0)
@@ -174,7 +203,7 @@ function start(a::AudioEngine)
     end
 end
 
-function stop(a::AudioEngine)
+function stop!(a::AudioEngine)
     a.should_stop = true
 end
 
