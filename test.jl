@@ -13,7 +13,7 @@ using .PortAudioSynth
 
 ##
 
-a = AudioEngine()
+a = AudioEngine(framecount = 64)
 
 ps = Tuple(PeriodicGenerator(PAS.triangle, 44100, 0.0, freq, 0.3, 0.0)
     for freq in [100.0, 200.0, 300.0])
@@ -31,7 +31,7 @@ push!(a.tracks, Track(
     ]
 ))
 
-@async start!(a)
+Threads.@spawn start!(a)
 ##
 
 for i in 1:100
@@ -58,18 +58,13 @@ stop!(a)
 
 ###
 
-
-using GLMakie
-
-
-
-struct Synth2
+struct Synth
     voices::Vector{PeriodicGenerator}
     playing::Vector{Bool}
     keys::Vector{Int}
 end
 
-function PortAudioSynth.next_sample!(synth::Synth2)
+function PortAudioSynth.next_sample!(synth::Synth)
     s = 0f0
     for (voice, playing) in zip(synth.voices, synth.playing)
         if playing
@@ -79,17 +74,16 @@ function PortAudioSynth.next_sample!(synth::Synth2)
     s
 end
 
-function handle_key!(s::Synth2, keyindex, action)
-
+function handle_key!(s::Synth, keyindex, action)
     function key_to_freq(keyindex)
         440 * 2 ^ (keyindex / 12)
     end
     
     j = findfirst(==(keyindex), s.keys)
     if j !== nothing
-        if action === Makie.Keyboard.release
+        if action == SDL_KEYUP
             s.playing[j] = false
-        elseif action === Makie.Keyboard.press
+        elseif action == SDL_KEYDOWN
             s.playing[j] = true
         end
     else
@@ -105,8 +99,9 @@ function handle_key!(s::Synth2, keyindex, action)
     return
 end
 
+
 ##
-synth = Synth2(
+synth = Synth(
     [PeriodicGenerator(PAS.triangle, 44100, 0.0, 0.0, 0.3, 0.0) for i in 1:5],
     zeros(Bool, 5),
     fill(-999, 5),
@@ -122,19 +117,19 @@ track = Track(
 function get_keyindex(key)
     d = begin
         possible_keys = [
-            Makie.Keyboard.a,
-            Makie.Keyboard.w,
-            Makie.Keyboard.s,
-            Makie.Keyboard.e,
-            Makie.Keyboard.d,
-            Makie.Keyboard.f,
-            Makie.Keyboard.t,
-            Makie.Keyboard.g,
-            Makie.Keyboard.y,
-            Makie.Keyboard.h,
-            Makie.Keyboard.u,
-            Makie.Keyboard.j,
-            Makie.Keyboard.k
+            SDL_SCANCODE_A,
+            SDL_SCANCODE_W,
+            SDL_SCANCODE_S,
+            SDL_SCANCODE_E,
+            SDL_SCANCODE_D,
+            SDL_SCANCODE_F,
+            SDL_SCANCODE_T,
+            SDL_SCANCODE_G,
+            SDL_SCANCODE_Y,
+            SDL_SCANCODE_H,
+            SDL_SCANCODE_U,
+            SDL_SCANCODE_J,
+            SDL_SCANCODE_K,
         ]
         Dict((possible_keys .=> 1:length(possible_keys))...)
     end
@@ -143,53 +138,74 @@ end
 
 ##
 
-s = Scene(camera = campixel!)
-
-isblack(i) = mod1(i, 12) ∈ (2, 4, 7, 9, 11)
-
-polys = let
-    lastblack = false
-    lastx = 0
-    Observable(map(1:14) do i
-        black = isblack(i)
-        xshift = 35
-        lastblack = black
-        lastx = lastx + xshift
-        Rect(lastx, 100, 30, 150)
-    end)
-end
-keycolor(i) = isblack(i) ? :black : :gray95
-colors = Observable(keycolor.(1:14))
-poly!(s, polys, color = colors, show_axis = false)
-
-display(s)
-
-##
-
-a = AudioEngine(framecount = 256, n_buffers = 8)
+a = AudioEngine(framecount = 128, n_buffers = 6)
 push!(a.tracks, track)
 
-@async start!(a)
+Threads.@spawn start!(a)
 
-on(s.events.keyboardbutton) do event
-    event.action === Makie.Keyboard.repeat && return
-    if event.key == Makie.Keyboard.escape
-        running[] = false
-    else
-        keyindex = get_keyindex(event.key)
-        keyindex === nothing && return
-        handle_key!(synth, keyindex, event.action)
-        if event.action === Makie.Keyboard.press
-            colors[][keyindex] = :red
-            notify(colors)
-        elseif event.action === Makie.Keyboard.release
-            colors[][keyindex] = keycolor(keyindex)
-            notify(colors)
+
+##
+stop!(a)
+
+
+
+##
+
+using SimpleDirectMediaLayer
+using SimpleDirectMediaLayer.LibSDL2
+
+##
+@assert SDL_Init(SDL_INIT_EVERYTHING) == 0 "error initializing SDL: $(unsafe_string(SDL_GetError()))"
+
+win = SDL_CreateWindow(
+    "Game",
+    SDL_WINDOWPOS_CENTERED,
+    SDL_WINDOWPOS_CENTERED,
+    200,
+    200,
+    SDL_WINDOW_SHOWN
+)
+SDL_SetWindowResizable(win, SDL_TRUE)
+
+@async try
+    close = false
+    while !close
+        event_ref = Ref{SDL_Event}()
+        while Bool(SDL_PollEvent(event_ref))
+            evt = event_ref[]
+            evt_ty = evt.type
+            if evt_ty == SDL_QUIT
+                close = true
+                break
+            elseif evt_ty in (SDL_KEYDOWN, SDL_KEYUP)
+                scan_code = evt.key.keysym.scancode
+                keyindex = get_keyindex(scan_code)
+                keyindex === nothing && break
+                handle_key!(synth, keyindex, evt_ty)
+                break
+            end
         end
+
+        sleep(0.001)
     end
+finally
+    println("SDL Done")
+    SDL_DestroyWindow(win)
+    SDL_Quit()
 end
 
 ##
 
-stop!(a)
-
+timestamps = let
+    timestamps = zeros(1000)
+    i = 1
+    t = Timer(0.0, interval = 0.0008) do t
+        if i <= 1000
+            timestamps[i] = time()
+            i += 1
+        end
+    end
+    sleep(1.2)
+    close(t)
+    timestamps |> diff
+end

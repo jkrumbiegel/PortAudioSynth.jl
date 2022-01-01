@@ -1,3 +1,3 @@
 [deps]
-GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
 PortAudio = "80ea8bcb-4634-5cb3-8ee8-a132660d1d2d"
+SimpleDirectMediaLayer = "98e33af6-2ee5-5afd-9e75-cbc738b767c4"

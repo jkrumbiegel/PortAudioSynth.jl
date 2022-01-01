@@ -44,13 +44,13 @@ function mycallback(inputbuffer, outputbuffer, framecount, timeinfo, statusflags
     ptr = audio.ptr
     pos = unsafe_load(audio.pos, 1)
 
-    for i in 1:256
+    for i in 1:framecount
         x = unsafe_load(ptr, pos - 1 + i)
         unsafe_store!(outputbuffer, x, 2i - 1)
         unsafe_store!(outputbuffer, x, 2i)
     end
 
-    newpos = mod1(pos + 256, audio.len)
+    newpos = mod1(pos + framecount, audio.len)
     unsafe_store!(audio.pos, newpos, 1)
 
     @ccall uv_async_send(audio.condition_handle::Ptr{Nothing})::Cvoid
