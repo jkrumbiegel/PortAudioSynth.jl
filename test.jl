@@ -6,17 +6,17 @@ includet("PortAudioSynth.jl")
 const PAS = PortAudioSynth
 using .PortAudioSynth
 
-
-
+using SimpleDirectMediaLayer
+using SimpleDirectMediaLayer.LibSDL2
 
 
 
 ##
 
-a = AudioEngine(framecount = 64)
+a = AudioEngine()
 
 ps = Tuple(PeriodicGenerator(PAS.triangle, 44100, 0.0, freq, 0.3, 0.0)
-    for freq in [100.0, 200.0, 300.0])
+    for freq in 0.6 .* [100.0, 200.0, 300.0])
 c = CombinedGenerator(
     ps,
 )
@@ -36,7 +36,7 @@ Threads.@spawn start!(a)
 
 for i in 1:100
     for p in ps
-        p.frequency_hz = p.frequency_hz + 0.5 * randn()
+        p.frequency_hz = p.frequency_hz + randn()
     end
     sleep(1/30)
 end
@@ -138,7 +138,7 @@ end
 
 ##
 
-a = AudioEngine(framecount = 128, n_buffers = 6)
+a = AudioEngine()
 push!(a.tracks, track)
 
 Threads.@spawn start!(a)
@@ -150,15 +150,10 @@ stop!(a)
 
 
 ##
-
-using SimpleDirectMediaLayer
-using SimpleDirectMediaLayer.LibSDL2
-
-##
 @assert SDL_Init(SDL_INIT_EVERYTHING) == 0 "error initializing SDL: $(unsafe_string(SDL_GetError()))"
 
 win = SDL_CreateWindow(
-    "Game",
+    "Synthesizer",
     SDL_WINDOWPOS_CENTERED,
     SDL_WINDOWPOS_CENTERED,
     200,
@@ -167,7 +162,7 @@ win = SDL_CreateWindow(
 )
 SDL_SetWindowResizable(win, SDL_TRUE)
 
-@async try
+try
     close = false
     while !close
         event_ref = Ref{SDL_Event}()
@@ -209,3 +204,19 @@ timestamps = let
     close(t)
     timestamps |> diff
 end
+
+
+##
+
+a = AudioEngine()
+push!(a.tracks,
+    Track(
+        PeriodicGenerator(PAS.triangle, 44100, 0.0, 220.0, 0.3, 0.0),
+        Effect[
+            VolumeWobble(1.0, 44100, 0.0, 3, 0.0),
+        ]
+    )
+)
+
+Threads.@spawn start!(a)
+stop!(a)

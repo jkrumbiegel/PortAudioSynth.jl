@@ -18,47 +18,76 @@ mutable struct AudioBuffer
     ptr::Ptr{Float32}
     buffer::Vector{Float32} # vector reference so no problems with garbage collection
     len::Int
-    pos::Ptr{Cint} # position of player in buffer
-    posvec::Vector{Cint} # vector reference so no problems with garbage collection
+    readpos::Ptr{Cint} # position of reader in buffer
+    readposvec::Vector{Cint} # vector reference so no problems with garbage collection
+    writepos::Ptr{Cint} # position of writer in buffer
+    writeposvec::Vector{Cint} # vector reference so no problems with garbage collection
     condition::Base.AsyncCondition
     condition_handle::Ptr{Nothing} # for calling with uv_async_send
 end
 
 function AudioBuffer(vec::Vector{Float32})
-    posvec = Cint[1]
+    readposvec = Cint[1]
+    writeposvec = Cint[0]
     cond = Base.AsyncCondition()
     AudioBuffer(
         Base.unsafe_convert(Ptr{Float32}, vec),
         vec, # for garbage safety
         length(vec),
-        Base.unsafe_convert(Ptr{Cint}, posvec),
-        posvec, # for garbage safety
+        Base.unsafe_convert(Ptr{Cint}, readposvec),
+        readposvec, # for garbage safety
+        Base.unsafe_convert(Ptr{Cint}, writeposvec),
+        writeposvec, # for garbage safety
         cond,
         cond.handle,
     )
 end
 
-function mycallback(inputbuffer, outputbuffer, framecount, timeinfo, statusflags, userdata)::Cint
+
+function portaudio_callback(inputbuffer, outputbuffer, framecount, timeinfo, statusflags, userdata)::Cint
 
     audio = unsafe_load(Ptr{AudioBuffer}(userdata))
-    ptr = audio.ptr
-    pos = unsafe_load(audio.pos, 1)
 
     for i in 1:framecount
-        x = unsafe_load(ptr, pos - 1 + i)
+        x = something(
+            read_circ_buffer!(audio.ptr, audio.len, audio.readpos, audio.writepos),
+            zero(Float32),
+        )
         unsafe_store!(outputbuffer, x, 2i - 1)
         unsafe_store!(outputbuffer, x, 2i)
     end
 
-    newpos = mod1(pos + framecount, audio.len)
-    unsafe_store!(audio.pos, newpos, 1)
-
-    @ccall uv_async_send(audio.condition_handle::Ptr{Nothing})::Cvoid
-
     return 0
 end
 
-cfunc = @cfunction mycallback Cint (
+function write_circ_buffer!(bufptr, buflen, value, readposptr, writeposptr)
+    readpos = unsafe_load(readposptr, 1)
+    writepos = unsafe_load(writeposptr, 1)
+    isfull = (writepos - readpos) + 1 == buflen
+    if !isfull
+        nextwritepos = writepos + 1
+        unsafe_store!(bufptr, value, mod1(nextwritepos, buflen))
+        Threads.atomic_fence()
+        unsafe_store!(writeposptr, nextwritepos)
+        return true
+    end
+    return false
+end
+
+function read_circ_buffer!(bufptr, buflen, readposptr, writeposptr)
+    readpos = unsafe_load(readposptr, 1)
+    writepos = unsafe_load(writeposptr, 1)
+    isempty = writepos < readpos
+    if !isempty
+        value = unsafe_load(bufptr, mod1(readpos, buflen))
+        Threads.atomic_fence()
+        unsafe_store!(readposptr, readpos + 1)
+        return value
+    end
+    return nothing
+end
+
+cfunc = @cfunction portaudio_callback Cint (
         Ptr{Float32},
         Ptr{Float32},
         Culong,
@@ -138,10 +167,10 @@ end
 
 function AudioEngine(;
         framecount = 256,
-        n_buffers = 8,
-        samplerate = 44100)
+        samplerate = 44100,
+        bufferlength = samplerate ÷ 2,
+    )
 
-    bufferlength = n_buffers * framecount
     buffer = zeros(Float32, bufferlength)
 
     AudioEngine(
@@ -173,29 +202,58 @@ function start!(a::AudioEngine)
     )
 
     pointer_to = mutable_pointer[]
-    @info "Starting stream"
-    @checkerr LibPortAudio.Pa_StartStream(pointer_to)
 
     try
-        lastplayhead = 1
-
-        while !a.should_stop
-            playhead = Int(a._audio.posvec[1])
-            # this will be wrong if the playhead went 1 cycle or more
-            nsamples = mod(playhead - lastplayhead, a.bufferlength)
-            pos = lastplayhead
-            lastplayhead = playhead
-            for i in 1:nsamples
-                new_sample = next_sample!(a)
-                if new_sample === nothing
-                    should_stop = true
-                    break
-                end
-                a.buffer[pos] = new_sample
-                pos = mod1(pos + 1 , a.bufferlength)
+        t_start = time()
+        n_samples_so_far = 0
+        timer = Timer(0.0, interval = 0.005) do _timer
+            if a.should_stop
+                close(_timer)
+                println("Timer stopped")
+                return
             end
-            wait(a._audio.condition)
+            dt = time() - t_start
+            n_samples = round(Int, dt * a.samplerate)
+            n_new_samples = n_samples - n_samples_so_far
+            n_samples_so_far = n_samples
+            for i in 1:n_new_samples
+                new_sample = next_sample!(a)
+                write_circ_buffer!(
+                    a._audio.ptr,
+                    a._audio.len,
+                    new_sample,
+                    a._audio.readpos,
+                    a._audio.writepos,
+                )
+            end
         end
+
+        sleep(0.002)
+
+        @info "Starting stream"
+        @checkerr LibPortAudio.Pa_StartStream(pointer_to)
+
+        # keep this thing alive
+        while !a.should_stop
+            sleep(1/10)
+        end
+        # while !a.should_stop
+        #     playhead = Int(a._audio.posvec[1])
+        #     # this will be wrong if the playhead went 1 cycle or more
+        #     nsamples = mod(playhead - lastplayhead, a.bufferlength)
+        #     pos = lastplayhead
+        #     lastplayhead = playhead
+        #     for i in 1:nsamples
+                
+        #         if new_sample === nothing
+        #             should_stop = true
+        #             break
+        #         end
+        #         a.buffer[pos] = new_sample
+        #         pos = mod1(pos + 1 , a.bufferlength)
+        #     end
+        #     wait(a._audio.condition)
+        # end
     finally
         @info "Stopping stream"
         @checkerr LibPortAudio.Pa_StopStream(pointer_to)
