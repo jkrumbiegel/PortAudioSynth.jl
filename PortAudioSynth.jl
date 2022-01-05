@@ -16,12 +16,12 @@ export stop!
 
 mutable struct AudioBuffer
     ptr::Ptr{Float32}
-    buffer::Vector{Float32} # vector reference so no problems with garbage collection
+    buffer::Vector{Float32} # reference to keep the pointer above valid
     len::Int
     readpos::Ptr{Cint} # position of reader in buffer
-    readposvec::Vector{Cint} # vector reference so no problems with garbage collection
+    readposvec::Vector{Cint} # reference to keep the pointer above valid
     writepos::Ptr{Cint} # position of writer in buffer
-    writeposvec::Vector{Cint} # vector reference so no problems with garbage collection
+    writeposvec::Vector{Cint} # reference to keep the pointer above valid
     condition::Base.AsyncCondition
     condition_handle::Ptr{Nothing} # for calling with uv_async_send
 end
@@ -49,6 +49,7 @@ function portaudio_callback(inputbuffer, outputbuffer, framecount, timeinfo, sta
     audio = unsafe_load(Ptr{AudioBuffer}(userdata))
 
     for i in 1:framecount
+        # read new samples from ring buffer and if there are none available, write silence
         x = something(
             read_circ_buffer!(audio.ptr, audio.len, audio.readpos, audio.writepos),
             zero(Float32),
@@ -67,7 +68,7 @@ function write_circ_buffer!(bufptr, buflen, value, readposptr, writeposptr)
     if !isfull
         nextwritepos = writepos + 1
         unsafe_store!(bufptr, value, mod1(nextwritepos, buflen))
-        Threads.atomic_fence()
+        Threads.atomic_fence() # ensure that the position is updated only after writing the value
         unsafe_store!(writeposptr, nextwritepos)
         return true
     end
@@ -80,7 +81,7 @@ function read_circ_buffer!(bufptr, buflen, readposptr, writeposptr)
     isempty = writepos < readpos
     if !isempty
         value = unsafe_load(bufptr, mod1(readpos, buflen))
-        Threads.atomic_fence()
+        Threads.atomic_fence() # ensure that the position is updated only after reading the value
         unsafe_store!(readposptr, readpos + 1)
         return value
     end
@@ -115,7 +116,7 @@ mutable struct PeriodicGenerator{F}
     current_period::Float64
 end
 
-function next_sample!(s::PeriodicGenerator)::Float32
+function next_sample!(s::PeriodicGenerator, t)::Float32
     delta_period = s.frequency_hz / s.samplerate * 2pi
     s.current_period = mod(s.current_period + delta_period, 2pi)
     sample = s.volume * s.func(s.current_period - s.phase)
@@ -127,7 +128,7 @@ mutable struct Gain <: Effect
     gain::Float32
 end
 
-next_sample!(g::Gain, s) = g.gain * s
+next_sample!(g::Gain, s, t) = g.gain * s
 
 mutable struct Delay <: Effect
     samplerate::Int
@@ -142,7 +143,7 @@ function Delay(samplerate, delay, gain)
     Delay(samplerate, delay, gain, zeros(Float32, bufferlength), 1)
 end
 
-function next_sample!(d::Delay, s::Float32)::Float32
+function next_sample!(d::Delay, s::Float32, t)::Float32
     newpos = mod1(d.position + 1, length(d.buffer))
     x = d.buffer[newpos]
     y = d.buffer[newpos] = d.gain * s + d.gain * x
@@ -160,6 +161,7 @@ mutable struct AudioEngine
     bufferlength::Int
     framecount::Int
     samplerate::Int
+    t::Float64
     buffer::Vector{Float32}
     _audio::AudioBuffer
     should_stop::Bool
@@ -178,6 +180,7 @@ function AudioEngine(;
         bufferlength,
         framecount,
         samplerate,
+        0.0,
         buffer,
         AudioBuffer(buffer),
         false,
@@ -203,20 +206,29 @@ function start!(a::AudioEngine)
 
     pointer_to = mutable_pointer[]
 
+    # the distance in samples that the writer should maintain against the reader
+    dist = 2 * a.framecount
+
     try
-        t_start = time()
-        n_samples_so_far = 0
-        timer = Timer(0.0, interval = 0.005) do _timer
+        # as a heuristic, we trigger the timer at half the portaudio buffer duration
+        timer = Timer(0.0, interval = 0.5 * a.framecount / a.samplerate) do _timer
+
+            writepos = a._audio.writeposvec[1]
+            readpos = a._audio.readposvec[1]
+            # we always try to stay a specific distance ahead of the reader,
+            # but the larger this is, the more audible delay there will be
+            samples_to_write = max(0, dist - min(dist, writepos - readpos))
+
             if a.should_stop
                 close(_timer)
                 println("Timer stopped")
                 return
             end
-            dt = time() - t_start
-            n_samples = round(Int, dt * a.samplerate)
-            n_new_samples = n_samples - n_samples_so_far
-            n_samples_so_far = n_samples
-            for i in 1:n_new_samples
+            # dt = time() - t_start
+            # n_samples = round(Int, dt * a.samplerate)
+            # n_new_samples = n_samples - n_samples_so_far
+            # n_samples_so_far = n_samples
+            for i in 1:samples_to_write
                 new_sample = next_sample!(a)
                 write_circ_buffer!(
                     a._audio.ptr,
@@ -228,8 +240,6 @@ function start!(a::AudioEngine)
             end
         end
 
-        sleep(0.002)
-
         @info "Starting stream"
         @checkerr LibPortAudio.Pa_StartStream(pointer_to)
 
@@ -237,23 +247,7 @@ function start!(a::AudioEngine)
         while !a.should_stop
             sleep(1/10)
         end
-        # while !a.should_stop
-        #     playhead = Int(a._audio.posvec[1])
-        #     # this will be wrong if the playhead went 1 cycle or more
-        #     nsamples = mod(playhead - lastplayhead, a.bufferlength)
-        #     pos = lastplayhead
-        #     lastplayhead = playhead
-        #     for i in 1:nsamples
-                
-        #         if new_sample === nothing
-        #             should_stop = true
-        #             break
-        #         end
-        #         a.buffer[pos] = new_sample
-        #         pos = mod1(pos + 1 , a.bufferlength)
-        #     end
-        #     wait(a._audio.condition)
-        # end
+
     finally
         @info "Stopping stream"
         @checkerr LibPortAudio.Pa_StopStream(pointer_to)
@@ -267,15 +261,8 @@ function stop!(a::AudioEngine)
 end
 
 function next_sample!(a::AudioEngine)::Float32
-    isempty(a.tracks) ? 0f0 : sum(next_sample!(t) for t in a.tracks)
-end
-
-function next_sample!(e::Track)::Float32
-    s = next_sample!(e.generator)
-    for ef in e.effects
-        s = next_sample!(ef, s)
-    end
-    s
+    a.t += 1/a.samplerate
+    isempty(a.tracks) ? 0f0 : sum(next_sample!(t, a.t) for t in a.tracks)
 end
 
 mutable struct VolumeWobble <: Effect
@@ -286,15 +273,15 @@ mutable struct VolumeWobble <: Effect
     current_period::Float64
 end
 
-function next_sample!(e::Track)::Float32
-    s = next_sample!(e.generator)
+function next_sample!(e::Track, t)::Float32
+    s = next_sample!(e.generator, t)
     for ef in e.effects
-        s::Float32 = next_sample!(ef, s)
+        s::Float32 = next_sample!(ef, s, t)
     end
     s
 end
 
-function next_sample!(v::VolumeWobble, s)::Float32
+function next_sample!(v::VolumeWobble, s, t)::Float32
     delta_period = v.frequency_hz / v.samplerate * 2pi
     v.current_period = mod(v.current_period + delta_period, 2pi)
     sample = s * (0.5 * v.strength * sin(v.current_period - v.phase) + (1 - 0.5 * v.strength))
@@ -306,8 +293,8 @@ end
 
 CombinedGenerator(args...) = CombinedGenerator(tuple(args...))
 
-function next_sample!(c::CombinedGenerator)::Float32
-    sum((next_sample!(g) for g in c.generators), init = 0f0)
+function next_sample!(c::CombinedGenerator, t)::Float32
+    sum((next_sample!(g, t) for g in c.generators), init = 0f0)
 end
 
 function triangle(period)

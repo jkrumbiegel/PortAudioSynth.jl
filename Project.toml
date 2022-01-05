@@ -1,3 +1,4 @@
 [deps]
+MIDI = "f57c4921-e30c-5f49-b073-3f2f2ada663e"
 PortAudio = "80ea8bcb-4634-5cb3-8ee8-a132660d1d2d"
-SimpleDirectMediaLayer = "98e33af6-2ee5-5afd-9e75-cbc738b767c4"
+RTMidi = "61e3d7d8-e608-4cda-adcd-333889191e0b"
